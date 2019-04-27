@@ -16,13 +16,68 @@ imapErrorSleepSeconds = 15
 imapCheckSleepSeconds = 5
 maxAccountLoopCounter = -1  # Default, run forever
 
-parser = argparse.ArgumentParser()
+configFileHelp = \
+"""
+
+Configuration takes the form of a "ini" style file.  
+Each ini section represents a account to process.  The section name must be unique.
+If the USER setting is missing the section name is used.
+
+INI File Values
+===============
+
+USER   - IMAP Authentication User, defaults to INI SECTION NAME if missing
+HOST   - IMAP Server
+PASS   - IMAP Password
+FOLDER - IMAP Folder to read from
+
+PIPE   - Email Body is piped to STDIN of this program
+    or
+EXEC   - Program is executed, but nothing is sent to STDIN
+
+ARGS   - Multi-line, each line is passed as a argument to the PIPE or EXEC program. Each line is properly quoted when passed to exec() or popen(). You may pass the following variable substitutions:
+    $TO         To Header, Cleaned to just email addresses
+    $FROM       From Header, Cleaned to just email addresses
+    $CC         CC Header, Cleaned to just email addresses
+    $SUBJECT    Subject header
+    $REPLYALL   All email addresses from $FROM and $CC combined
+    $BODY       The entire message body
+
+Example Configuration:
+======================
+
+[blah@gmail.com]
+HOST = imap.gmail.com
+PASS = blahBLAHblahPASSWORD
+PIPE = /sage/platform/scripts/sysmatt.epson.note
+ARGS = -s
+    $SUBJECT
+    -f
+    $FROM
+
+[blah@gmail.com/SpecialLabel]
+USER   = blah@gmail.com
+HOST   = imap.gmail.com
+PASS   = blahBLAHblahPASSWORD
+PIPE   = /sage/platform/scripts/sysmatt.epson.note
+FOLDER = MySpecialLabel
+ARGS   = -s
+    Additional Text $SUBJECT
+    -f
+    $FROM
+    -r
+    $REPLY
+
+
+"""
+
+parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter, epilog=configFileHelp)
 parser.add_argument("-v", "--verbose",  help="increase output verbosity", action="store_true")
 parser.add_argument("-d", "--debug",    help="enable debugging output", action="store_true")
 parser.add_argument("-C", "--clear",    help="clear out pending messages upon startup before processing", action="store_true")
 parser.add_argument("-o", "--oneshot",  help="process account(s) only once then exit", action="store_true")
 parser.add_argument("-n", "--numloops", help="process account(s) this many times then exit", action="store")
-parser.add_argument("configFile",    help="provide a configuration file", action="store")
+parser.add_argument("configFile",    help="provide a ini configuration file", action="store")
 args = parser.parse_args()
 
 # Holder of imap connection objects
