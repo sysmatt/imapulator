@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 
-import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, imaplib, email, email.header, email.utils, string
+import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, imaplib, email, email.header, email.utils, string, subprocess, fcntl
 import pprint
 
 warnings.filterwarnings('ignore')
@@ -130,6 +130,27 @@ for thisAccount in  (config.sections()):
             if emailData['CC']:
                 emailData['REPLYALL'] = ",".join([emailData['REPLYALL'],emailData['CC']])
             logger.debug(emailDataSubst(emailData,"emailDataSubst: TO[$TO] FROM[$FROM] CC[$CC] SUBJECT[$SUBJECT] REPLYALL[$REPLYALL] BODY[\n$BODY\n]"))
+            thisArgs = []
+            if config[thisAccount].get('EXEC',None):
+                    thisArgs.append(config[thisAccount]['EXEC'])
+                    procInput=None
+            elif config[thisAccount].get('PIPE',None):
+                    thisArgs.append(config[thisAccount]['PIPE'])
+                    procInput=emailData['BODY']
+            else:
+                bomb("No action specified for [{}]".format(thisAccount))
+            if config[thisAccount].get('ARGS',None):
+                # process args into list
+                for line in config[thisAccount]['ARGS'].splitlines():
+                    lineOut = emailDataSubst(emailData,line)
+                    logger.debug("Arg processing: line[{}] to [{}]".format(line,lineOut))
+                    thisArgs.append(lineOut)
+            logger.debug("FINAL SUBPROCESS: [{}]".format("],[".join(thisArgs)))
+            with subprocess.Popen(thisArgs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+                thisStdout,thisStderr = proc.communicate(input=procInput)
+                logger.debug("PROC STDOUT: [{}]".format(thisStdout))
+                logger.debug("PROC STDERR: [{}]".format(thisStderr))
+                logger.debug("exit rc[{}]".format(proc.returncode))
             #bomb("Testing")
 
 
