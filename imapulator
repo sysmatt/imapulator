@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 
-import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, imaplib, email, email.header, email.utils, string, subprocess, fcntl
+import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, imaplib, email, email.header, email.utils, string, subprocess
 import pprint
 
 warnings.filterwarnings('ignore')
@@ -12,11 +12,16 @@ logger = logging.getLogger(ME)
 start_time = time.time()
 configIni = {}
 config = {}
+imapErrorSleepSeconds = 15
+imapCheckSleepSeconds = 5
+maxAccountLoopCounter = -1  # Default, run forever
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-v", "--verbose",  help="increase output verbosity", action="store_true")
 parser.add_argument("-d", "--debug",    help="enable debugging output", action="store_true")
 parser.add_argument("-C", "--clear",    help="clear out pending messages upon startup before processing", action="store_true")
+parser.add_argument("-o", "--oneshot",  help="process account(s) only once then exit", action="store_true")
+parser.add_argument("-n", "--numloops", help="process account(s) this many times then exit", action="store")
 parser.add_argument("configFile",    help="provide a configuration file", action="store")
 args = parser.parse_args()
 
@@ -27,6 +32,12 @@ if args.verbose:
     logger.setLevel(logging.INFO)
 if args.debug:
     logger.setLevel(logging.DEBUG)
+if args.oneshot:
+    maxAccountLoopCounter = 1
+    logger.debug("Oneshot mode")
+if args.numloops:
+    maxAccountLoopCounter = int(args.numloops)
+    logger.debug("Limit to [{}] account loops".format(maxAccountLoopCounter))
 
 
 def bomb(chunk):
@@ -82,80 +93,86 @@ for thisAccount in  (config.sections()):
     imapConnect(thisAccount)
 
 
-for thisAccount in  (config.sections()):
-    thisImap = imap[thisAccount]
-    thisFolder = config[thisAccount].get('FOLDER','INBOX')
-    try:
-        logger.debug("Select folder [{}]".format(thisFolder))
-        thisImap.select(thisFolder)
-        rc, uidList = thisImap.uid('search',None,'ALL')
-        msgQty = len(uidList[0].split())
-        logger.debug("IMAP UID Search rc[{}] msgQty[{}]".format(rc,msgQty))
-        for msgNum in range(msgQty):
-            thisItemUid = uidList[0].split()[msgNum]
-            rc, emailData = thisImap.uid('fetch', thisItemUid, '(RFC822)')
-            logger.debug("IMAP UID Fetch rc[{}] msgNum[{}] thisItemUid[{}]".format(rc,msgNum,str(thisItemUid.decode('utf-8'))))
-            emailRaw = emailData[0][1]
-            emailMessage = email.message_from_string(emailRaw.decode('utf-8'))
-            #logger.debug("emailMessage pprint={}".format(emailMessage))
-            #logger.debug("dir emailMessage={}".format(dir(emailMessage)))
-            #emailSubject, emailFrom, emailTo, emailCc = ['','','','']
-            #if emailMessage['Subject']:
-            #    emailSubject = email.header.decode_header(emailMessage['Subject'])[0][0]
-            #if emailMessage['From']:
-            #    emailFrom    = email.header.decode_header(emailMessage['From'])[0][0]
-            #    t = email.utils.getaddresses(emailMessage.get_all('from',[]))
-            #    logger.debug("From={}".format(pprint.pformat(emailMessage['From'])))
-            #    logger.debug("util From={}".format(pprint.pformat(t)))
-            #if emailMessage['To']:
-            #    emailTo      = email.header.decode_header(emailMessage['To'])[0][0]
-            #if emailMessage['Cc']:
-            #    emailCc      = email.header.decode_header(emailMessage['Cc'])[0][0]
-            # this will loop through all the available multiparts in mail
-            emailData = {}
-            emailData['BODY'] = ""
-            for part in emailMessage.walk():
-                if part.get_content_type() == "text/plain": # ignore attachments/html
-                    body = str(part.get_payload(decode=True).decode('utf-8'))
-                    logger.debug("Body [\n{}\n]".format(body))
-                    emailData['BODY'] += body
+accountLoopCounter = 0
+while accountLoopCounter != maxAccountLoopCounter:
+    logger.debug("ACCOUNT LOOP ctr[{}] max[{}]".format(accountLoopCounter,maxAccountLoopCounter))
+    for thisAccount in  (config.sections()):
+        thisImap = imap[thisAccount]
+        thisFolder = config[thisAccount].get('FOLDER','INBOX')
+        try:
+            logger.debug("Select folder [{}]".format(thisFolder))
+            thisImap.select(thisFolder)
+            rc, uidList = thisImap.uid('search',None,'ALL')
+            msgQty = len(uidList[0].split())
+            logger.debug("IMAP UID Search rc[{}] msgQty[{}]".format(rc,msgQty))
+            for msgNum in range(msgQty):
+                thisItemUid = uidList[0].split()[msgNum]
+                if args.clear:
+                    if accountLoopCounter == 0:
+                        # We are asked to clear the FOLDER on startup
+                        logger.debug("CLEAR on STARTUP, delete UID [{}]".format(thisItemUid))
+                        thisImap.uid('store',thisItemUid,'+FLAGS','\\Deleted')
+                        continue
+                rc, emailData = thisImap.uid('fetch', thisItemUid, '(RFC822)')
+                logger.debug("IMAP UID Fetch rc[{}] msgNum[{}] thisItemUid[{}]".format(rc,msgNum,str(thisItemUid.decode('utf-8'))))
+                emailRaw = emailData[0][1]
+                emailMessage = email.message_from_string(emailRaw.decode('utf-8'))
+                emailData = {}
+                emailData['BODY'] = ""
+                for part in emailMessage.walk():
+                    if part.get_content_type() == "text/plain": # ignore attachments/html
+                        body = str(part.get_payload(decode=True).decode('utf-8'))
+                        logger.debug("Body [\n{}\n]".format(body))
+                        emailData['BODY'] += body
+                    else:
+                        continue
+                # Assign all the data we will pass to actions
+                emailData['TO']         = getCleanAddrHeader(emailMessage,"to")
+                emailData['FROM']       = getCleanAddrHeader(emailMessage,"from")
+                emailData['CC']         = getCleanAddrHeader(emailMessage,"cc")
+                emailData['SUBJECT']    = emailMessage['subject']
+                emailData['REPLYALL']   = emailData['FROM']
+                if emailData['CC']:
+                    emailData['REPLYALL'] = ",".join([emailData['REPLYALL'],emailData['CC']])
+                logger.debug(emailDataSubst(emailData,"emailDataSubst: TO[$TO] FROM[$FROM] CC[$CC] SUBJECT[$SUBJECT] REPLYALL[$REPLYALL] BODY[\n$BODY\n]"))
+                thisArgs = []
+                if config[thisAccount].get('EXEC',None):
+                        thisArgs.append(config[thisAccount]['EXEC'])
+                        procInput=None
+                elif config[thisAccount].get('PIPE',None):
+                        thisArgs.append(config[thisAccount]['PIPE'])
+                        procInput=emailData['BODY']
                 else:
-                    continue
-            # Assign all the data we will pass to actions
-            emailData['TO']         = getCleanAddrHeader(emailMessage,"to")
-            emailData['FROM']       = getCleanAddrHeader(emailMessage,"from")
-            emailData['CC']         = getCleanAddrHeader(emailMessage,"cc")
-            emailData['SUBJECT']    = emailMessage['subject']
-            emailData['REPLYALL']   = emailData['FROM']
-            if emailData['CC']:
-                emailData['REPLYALL'] = ",".join([emailData['REPLYALL'],emailData['CC']])
-            logger.debug(emailDataSubst(emailData,"emailDataSubst: TO[$TO] FROM[$FROM] CC[$CC] SUBJECT[$SUBJECT] REPLYALL[$REPLYALL] BODY[\n$BODY\n]"))
-            thisArgs = []
-            if config[thisAccount].get('EXEC',None):
-                    thisArgs.append(config[thisAccount]['EXEC'])
-                    procInput=None
-            elif config[thisAccount].get('PIPE',None):
-                    thisArgs.append(config[thisAccount]['PIPE'])
-                    procInput=emailData['BODY']
-            else:
-                bomb("No action specified for [{}]".format(thisAccount))
-            if config[thisAccount].get('ARGS',None):
-                # process args into list
-                for line in config[thisAccount]['ARGS'].splitlines():
-                    lineOut = emailDataSubst(emailData,line)
-                    logger.debug("Arg processing: line[{}] to [{}]".format(line,lineOut))
-                    thisArgs.append(lineOut)
-            logger.debug("FINAL SUBPROCESS: [{}]".format("],[".join(thisArgs)))
-            with subprocess.Popen(thisArgs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
-                thisStdout,thisStderr = proc.communicate(input=procInput)
-                logger.debug("PROC STDOUT: [{}]".format(thisStdout))
-                logger.debug("PROC STDERR: [{}]".format(thisStderr))
-                logger.debug("exit rc[{}]".format(proc.returncode))
-            #bomb("Testing")
+                    bomb("No action specified for [{}]".format(thisAccount))
+                if config[thisAccount].get('ARGS',None):
+                    # process args into list
+                    for line in config[thisAccount]['ARGS'].splitlines():
+                        lineOut = emailDataSubst(emailData,line)
+                        logger.debug("Arg processing: line[{}] to [{}]".format(line,lineOut))
+                        thisArgs.append(lineOut)
+                logger.debug("FINAL SUBPROCESS: [{}]".format("],[".join(thisArgs)))
+                with subprocess.Popen(thisArgs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True) as proc:
+                    thisStdout,thisStderr = proc.communicate(input=procInput)
+                    logger.debug("PROC STDOUT: [{}]".format(thisStdout))
+                    logger.debug("PROC STDERR: [{}]".format(thisStderr))
+                    logger.debug("exit rc[{}]".format(proc.returncode))
+                    if proc.returncode == 0:
+                        logger.debug("Processing complete, deleteing message uid [{}]".format(thisItemUid))
+                        thisImap.uid('store',thisItemUid,'+FLAGS','\\Deleted')
+                    else:
+                        logger.debug("Processing failed, NOT deleteing message uid [{}]".format(thisItemUid))
+            logger.debug("Expunge [{}]".format(thisAccount))
+            thisImap.expunge() 
+            time.sleep(imapCheckSleepSeconds)
+            accountLoopCounter += 1
 
 
-    #except Exception as error:
-    except AssertionError as error:
-        bomb("Unable to select IMAP folder [{}] got error [{}]".format(thisFolder, error))
+        #except Exception as error:
+        except AssertionError as error:
+            # If we run into any issues with this connection we re-try connecting with a delay
+            logger.error("IMAP Exception [{}], sleeping {} seconds and reconnecting to {}".format(error,imapErrorSleepSeconds,thisAccount))
+            time.sleep(imapErrorSleepSeconds)
+            imapConnect(thisAccount)
+            #bomb("Unable to select IMAP folder [{}] got error [{}]".format(thisFolder, error))
 
 
