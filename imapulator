@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+
+
+import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, imaplib, email, email.header
+
+warnings.filterwarnings('ignore')
+ME = os.path.basename(sys.argv[0])
+loggingFormat='%(asctime)s %(filename)s: %(message)s'
+logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format=loggingFormat)
+logger = logging.getLogger(ME)
+start_time = time.time()
+configIni = {}
+config = {}
+
+parser = argparse.ArgumentParser()
+parser.add_argument("-v", "--verbose",  help="increase output verbosity", action="store_true")
+parser.add_argument("-d", "--debug",    help="enable debugging output", action="store_true")
+parser.add_argument("-C", "--clear",    help="clear out pending messages upon startup before processing", action="store_true")
+parser.add_argument("configFile",    help="provide a configuration file", action="store")
+args = parser.parse_args()
+
+# Holder of imap connection objects
+imap = {}
+
+if args.verbose:
+    logger.setLevel(logging.INFO)
+if args.debug:
+    logger.setLevel(logging.DEBUG)
+
+
+def bomb(chunk):
+	logger.error("%s",chunk)
+	sys.exit(1)
+
+def imapConnect(thisAccount):
+    global imap
+    logger.debug("Opening [{}] IMAP to host [{}]".format(thisAccount, config[thisAccount]['HOST']))
+    try:
+        imap[thisAccount]  = imaplib.IMAP4_SSL(config[thisAccount]['HOST'])
+    except Exception as error:
+        bomb("Unable to connect to HOST [{}]".format(error))
+
+    logger.debug("Authenticating [{}] IMAP to host [{}]".format(thisAccount, config[thisAccount]['HOST']))
+    try:
+        logger.debug("IMAP Login for USER [{}]".format(config[thisAccount].get('USER',thisAccount)))
+        imap[thisAccount].login(config[thisAccount].get('USER',thisAccount), config[thisAccount]['PASS'])
+    except Exception as error:
+        bomb("Authentication error [{}]".format(error))
+
+
+config = configparser.ConfigParser()
+
+try:
+    logger.debug("Reading configFile [{}]".format(args.configFile))
+    config.read_file(open(args.configFile))
+except Exception as error:
+    bomb("Unable to read configFile [{}]".format(error))
+
+
+
+for thisAccount in  (config.sections()):
+    logger.debug("Opening initial connection for IMAP account [{}]".format(thisAccount))
+    imapConnect(thisAccount)
+
+
+for thisAccount in  (config.sections()):
+    thisImap = imap[thisAccount]
+    thisFolder = config[thisAccount].get('FOLDER','INBOX')
+    try:
+        logger.debug("Select folder [{}]".format(thisFolder))
+        thisImap.select(thisFolder)
+        rc, uidList = thisImap.uid('search',None,'ALL')
+        msgQty = len(uidList[0].split())
+        logger.debug("IMAP UID Search rc[{}] msgQty[{}]".format(rc,msgQty))
+        for msgNum in range(msgQty):
+            thisItemUid = uidList[0].split()[msgNum]
+            rc, emailData = thisImap.uid('fetch', thisItemUid, '(RFC822)')
+            logger.debug("IMAP UID Fetch rc[{}] msgNum[{}] thisItemUid[{}]".format(rc,msgNum,str(thisItemUid.decode('utf-8'))))
+            emailRaw = emailData[0][1]
+            emailMessage = email.message_from_string(emailRaw.decode('utf-8'))
+            emailSubject = email.header.decode_header(emailMessage['Subject'])[0][0]
+            emailFrom    = email.header.decode_header(emailMessage['From'])[0][0]
+            logger.debug("emailFrom[{}] emailSubject[{}]".format(emailFrom,emailSubject))
+            # this will loop through all the available multiparts in mail
+            for part in emailMessage.walk():
+                if part.get_content_type() == "text/plain": # ignore attachments/html
+                    body = str(part.get_payload(decode=True).decode('utf-8'))
+                    logger.debug("Body [\n{}\n]".format(body))
+                else:
+                    continue
+
+
+    except Exception as error:
+        bomb("Unable to select IMAP folder [{}] got error [{}]".format(thisFolder, error))
+
+
