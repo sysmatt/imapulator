@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 
-import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, imaplib, email, email.header
+import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, imaplib, email, email.header, email.utils, string
+import pprint
 
 warnings.filterwarnings('ignore')
 ME = os.path.basename(sys.argv[0])
@@ -57,6 +58,24 @@ except Exception as error:
     bomb("Unable to read configFile [{}]".format(error))
 
 
+def getCleanAddrHeader(msg,header):
+    out = []
+    for ht in email.utils.getaddresses(msg.get_all(header,[])):
+        if ht:
+            displayName,cleanAddr = ht
+            logger.debug("ht[{}] displayName[{}] cleanAddr[{}]".format(ht,displayName,cleanAddr))
+            out.append(cleanAddr)
+    if out:
+        logger.debug("getCleanAddrHeader header[{}] ret[{}]".format(header,",".join(out)))
+        return(",".join(out))
+    else:
+        logger.debug("getCleanAddrHeader header[{}] empty".format(header))
+        return("")
+
+def emailDataSubst(emailData,templateIn):
+    out=string.Template(templateIn).safe_substitute(emailData)
+    logger.debug("templateIn[{}] out[{}]".format(templateIn,out))
+    return(out)
 
 for thisAccount in  (config.sections()):
     logger.debug("Opening initial connection for IMAP account [{}]".format(thisAccount))
@@ -78,19 +97,44 @@ for thisAccount in  (config.sections()):
             logger.debug("IMAP UID Fetch rc[{}] msgNum[{}] thisItemUid[{}]".format(rc,msgNum,str(thisItemUid.decode('utf-8'))))
             emailRaw = emailData[0][1]
             emailMessage = email.message_from_string(emailRaw.decode('utf-8'))
-            emailSubject = email.header.decode_header(emailMessage['Subject'])[0][0]
-            emailFrom    = email.header.decode_header(emailMessage['From'])[0][0]
-            logger.debug("emailFrom[{}] emailSubject[{}]".format(emailFrom,emailSubject))
+            #logger.debug("emailMessage pprint={}".format(emailMessage))
+            #logger.debug("dir emailMessage={}".format(dir(emailMessage)))
+            #emailSubject, emailFrom, emailTo, emailCc = ['','','','']
+            #if emailMessage['Subject']:
+            #    emailSubject = email.header.decode_header(emailMessage['Subject'])[0][0]
+            #if emailMessage['From']:
+            #    emailFrom    = email.header.decode_header(emailMessage['From'])[0][0]
+            #    t = email.utils.getaddresses(emailMessage.get_all('from',[]))
+            #    logger.debug("From={}".format(pprint.pformat(emailMessage['From'])))
+            #    logger.debug("util From={}".format(pprint.pformat(t)))
+            #if emailMessage['To']:
+            #    emailTo      = email.header.decode_header(emailMessage['To'])[0][0]
+            #if emailMessage['Cc']:
+            #    emailCc      = email.header.decode_header(emailMessage['Cc'])[0][0]
             # this will loop through all the available multiparts in mail
+            emailData = {}
+            emailData['BODY'] = ""
             for part in emailMessage.walk():
                 if part.get_content_type() == "text/plain": # ignore attachments/html
                     body = str(part.get_payload(decode=True).decode('utf-8'))
                     logger.debug("Body [\n{}\n]".format(body))
+                    emailData['BODY'] += body
                 else:
                     continue
+            # Assign all the data we will pass to actions
+            emailData['TO']         = getCleanAddrHeader(emailMessage,"to")
+            emailData['FROM']       = getCleanAddrHeader(emailMessage,"from")
+            emailData['CC']         = getCleanAddrHeader(emailMessage,"cc")
+            emailData['SUBJECT']    = emailMessage['subject']
+            emailData['REPLYALL']   = emailData['FROM']
+            if emailData['CC']:
+                emailData['REPLYALL'] = ",".join([emailData['REPLYALL'],emailData['CC']])
+            logger.debug(emailDataSubst(emailData,"emailDataSubst: TO[$TO] FROM[$FROM] CC[$CC] SUBJECT[$SUBJECT] REPLYALL[$REPLYALL] BODY[\n$BODY\n]"))
+            #bomb("Testing")
 
 
-    except Exception as error:
+    #except Exception as error:
+    except AssertionError as error:
         bomb("Unable to select IMAP folder [{}] got error [{}]".format(thisFolder, error))
 
 
