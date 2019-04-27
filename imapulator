@@ -19,6 +19,9 @@ maxAccountLoopCounter = -1  # Default, run forever
 configFileHelp = \
 """
 
+Configuration File Format
+=========================
+
 Configuration takes the form of a "ini" style file.  
 Each ini section represents a account to process.  The section name must be unique.
 If the USER setting is missing the section name is used.
@@ -35,7 +38,10 @@ PIPE   - Email Body is piped to STDIN of this program
     or
 EXEC   - Program is executed, but nothing is sent to STDIN
 
-ARGS   - Multi-line, each line is passed as a argument to the PIPE or EXEC program. Each line is properly quoted when passed to exec() or popen(). You may pass the following variable substitutions:
+ARGS   - Multi-line, each line is passed as a argument to the PIPE or EXEC program. 
+         Each line is properly quoted when passed to exec() or popen(). 
+         You may pass the following variable substitutions:
+
     $TO         To Header, Cleaned to just email addresses
     $FROM       From Header, Cleaned to just email addresses
     $CC         CC Header, Cleaned to just email addresses
