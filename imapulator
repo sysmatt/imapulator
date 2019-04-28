@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 
-import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, imaplib, email, email.header, email.utils, string, subprocess
+import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, imaplib, email, email.header, email.utils, string, subprocess, uuid
 import pprint
 
 warnings.filterwarnings('ignore')
@@ -23,7 +23,7 @@ Configuration File Format
 =========================
 
 Configuration takes the form of a "ini" style file.  
-Each ini section represents a account to process.  The section name must be unique.
+Each ini section represents an account to process.  The section name must be unique.
 If the USER setting is missing the section name is used.
 
 INI File Values
@@ -33,30 +33,47 @@ USER   - IMAP Authentication User, defaults to INI SECTION NAME if missing
 HOST   - IMAP Server
 PASS   - IMAP Password
 FOLDER - IMAP Folder to read from
+SAVEATT- Save all attachments in this (existing) directory
+          For each message with attachments, a subdir uuid1 will be created.
+          attachments will be saved in that dir
+          Using /tmp here, for example, is safe.
+          You are responsible for cleaning up.
 
 PIPE   - Email Body is piped to STDIN of this program
     or
 EXEC   - Program is executed, but nothing is sent to STDIN
+          Note, $BODY and $BODYLINE are provided below to pass message body 
+          as argument.
 
 ARGS   - Multi-line, each line is passed as a argument to the PIPE or EXEC program. 
-         Each line is properly quoted when passed to exec() or popen(). 
-         You may pass the following variable substitutions:
+          Additional lines are indented.
+          Each line is properly quoted when passed to exec() or popen(). 
+          You may pass the following variable substitutions in arguments:
 
     $TO         To Header, Cleaned to just email addresses
     $FROM       From Header, Cleaned to just email addresses
     $CC         CC Header, Cleaned to just email addresses
     $SUBJECT    Subject header
     $REPLYALL   All email addresses from $FROM and $CC combined
-    $BODY       The entire message body
+    $BODY       The entire message body, including newlines
+    $BODYLINE   The entire message body, all in single line. All whitespace
+                 Including newlines are replaced by single spaces.
+    $ATTDIR     The directory where attachments were stored, null if none.
+    $ATTFILES   Replaced with properly quoted list of files. Note, this special
+                 variable can not be combined with any other text in the same
+                 INI ARGS line.  It should be used on a ARGS line on its own.
+                 It is replaced with a list of files, passed directly to exec() or 
+                 popen(), Most useful as last argument since it is variable length.
 
 Example Configuration:
 ======================
 
 [blah@gmail.com]
-HOST = imap.gmail.com
-PASS = blahBLAHblahPASSWORD
-PIPE = /sage/platform/scripts/sysmatt.epson.note
-ARGS = -s
+HOST    = imap.gmail.com
+PASS    = blahBLAHblahPASSWORD
+SAVEATT = /tmp
+PIPE    = /sage/platform/scripts/sysmatt.epson.note
+ARGS    = -s
     $SUBJECT
     -f
     $FROM
@@ -73,6 +90,20 @@ ARGS   = -s
     $FROM
     -r
     $REPLY
+
+[blah@gmail.com/ExecExample]
+USER   = blah@gmail.com
+HOST   = imap.gmail.com
+PASS   = blahBLAHblahPASSWORD
+EXEC   = /sage/platform/scripts/sysmatt.epson.note
+ARGS   = -s
+    Additional Text $SUBJECT
+    -f
+    $FROM
+    -r
+    $REPLY
+    $BODYLINE
+    $ATTFILES
 
 
 """
@@ -167,35 +198,57 @@ while accountLoopCounter != maxAccountLoopCounter:
             msgQty = len(uidList[0].split())
             logger.debug("IMAP UID Search rc[{}] msgQty[{}]".format(rc,msgQty))
             for msgNum in range(msgQty):
+                thisEmailUUID = str(uuid.uuid1())  # Used for saves
                 thisItemUid = uidList[0].split()[msgNum]
                 if args.clear:
                     if accountLoopCounter == 0:
                         # We are asked to clear the FOLDER on startup
-                        logger.debug("CLEAR on STARTUP, delete UID [{}]".format(thisItemUid))
+                        logger.info("CLEAR on STARTUP, delete UID [{}]".format(thisItemUid))
                         thisImap.uid('store',thisItemUid,'+FLAGS','\\Deleted')
                         continue
                 rc, emailData = thisImap.uid('fetch', thisItemUid, '(RFC822)')
-                logger.debug("IMAP UID Fetch rc[{}] msgNum[{}] thisItemUid[{}]".format(rc,msgNum,str(thisItemUid.decode('utf-8'))))
+                logger.info("IMAP UID Fetch rc[{}] msgNum[{}] thisItemUid[{}]".format(rc,msgNum,str(thisItemUid.decode('utf-8'))))
                 emailRaw = emailData[0][1]
                 emailMessage = email.message_from_string(emailRaw.decode('utf-8'))
                 emailData = {}
                 emailData['BODY'] = ""
+                emailData['BODYLINE'] = ""
+                emailData['ATTDIR'] = ""    # Assigned firname IF attachments were saved
+                emailData['ATTFILES'] = []  # List !!!
                 for part in emailMessage.walk():
-                    if part.get_content_type() == "text/plain": # ignore attachments/html
-                        body = str(part.get_payload(decode=True).decode('utf-8'))
-                        logger.debug("Body [\n{}\n]".format(body))
-                        emailData['BODY'] += body
-                    else:
-                        continue
+                    logger.debug("PART WHATSIT: Content-Disposition[{}] get_filename[{}] get_content_type[{}]".format(part.get('Content-Disposition'),part.get_filename(),part.get_content_type()))
+                    if part.get('Content-Disposition') is None:
+                        if part.get_content_type() == "text/plain": # only text please
+                            body = str(part.get_payload(decode=True).decode('utf-8'))
+                            logger.debug("Body [\n{}\n]".format(body))
+                            emailData['BODY'] += body
+                        else:
+                            logger.debug("Skipping part. not text/plain")
+                            continue
+                    else:   # Content-Disposition not None, maybe attachment
+                        fileName = part.get_filename()
+                        if bool(fileName):
+                            if config[thisAccount].get('SAVEATT',None):
+                                savedir = os.path.join(config[thisAccount]['SAVEATT'], thisEmailUUID)
+                                if not os.path.exists(savedir):
+                                    os.mkdir(savedir)
+                                filePath = os.path.join(savedir, fileName)
+                                if not os.path.isfile(filePath) :
+                                    emailData['ATTDIR'] = savedir # This triggers handling in popen/exec
+                                    emailData['ATTFILES'].append(filePath) # Special, this is a list!
+                                    fp = open(filePath, 'wb')
+                                    fp.write(part.get_payload(decode=True))
+                                    fp.close()
                 # Assign all the data we will pass to actions
                 emailData['TO']         = getCleanAddrHeader(emailMessage,"to")
                 emailData['FROM']       = getCleanAddrHeader(emailMessage,"from")
                 emailData['CC']         = getCleanAddrHeader(emailMessage,"cc")
                 emailData['SUBJECT']    = emailMessage['subject']
                 emailData['REPLYALL']   = emailData['FROM']
+                emailData['BODYLINE']   = " ".join(emailData['BODY'].split()) # convert entire email text into a single space separated line, better for use in ARGS
                 if emailData['CC']:
                     emailData['REPLYALL'] = ",".join([emailData['REPLYALL'],emailData['CC']])
-                logger.debug(emailDataSubst(emailData,"emailDataSubst: TO[$TO] FROM[$FROM] CC[$CC] SUBJECT[$SUBJECT] REPLYALL[$REPLYALL] BODY[\n$BODY\n]"))
+                logger.info(emailDataSubst(emailData,"Processing Message: TO[$TO] FROM[$FROM] CC[$CC] SUBJECT[$SUBJECT] REPLYALL[$REPLYALL] BODY[\n$BODY\n]"))
                 thisArgs = []
                 if config[thisAccount].get('EXEC',None):
                         thisArgs.append(config[thisAccount]['EXEC'])
@@ -205,23 +258,29 @@ while accountLoopCounter != maxAccountLoopCounter:
                         procInput=emailData['BODY']
                 else:
                     bomb("No action specified for [{}]".format(thisAccount))
+                logger.info(" === BEGIN ACTION ===")
                 if config[thisAccount].get('ARGS',None):
                     # process args into list
                     for line in config[thisAccount]['ARGS'].splitlines():
-                        lineOut = emailDataSubst(emailData,line)
-                        logger.debug("Arg processing: line[{}] to [{}]".format(line,lineOut))
-                        thisArgs.append(lineOut)
-                logger.debug("FINAL SUBPROCESS: [{}]".format("],[".join(thisArgs)))
+                        if '$ATTFILES' in line:
+                            # special, for attachment file list, append list directly
+                            thisArgs.extend(emailData['ATTFILES'])
+                            logger.debug("Arg processing: line[{}] to att list [{}]".format(line,",".join(emailData['ATTFILES'])))
+                        else:
+                            lineOut = emailDataSubst(emailData,line)
+                            logger.debug("Arg processing: line[{}] to [{}]".format(line,lineOut))
+                            thisArgs.append(lineOut)
+                logger.info("FINAL SUBPROCESS: [{}]".format("],[".join(thisArgs)))
                 with subprocess.Popen(thisArgs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True) as proc:
                     thisStdout,thisStderr = proc.communicate(input=procInput)
-                    logger.debug("PROC STDOUT: [{}]".format(thisStdout))
-                    logger.debug("PROC STDERR: [{}]".format(thisStderr))
-                    logger.debug("exit rc[{}]".format(proc.returncode))
+                    logger.info("PROC STDOUT: [{}]".format(thisStdout))
+                    logger.info("PROC STDERR: [{}]".format(thisStderr))
+                    logger.info("exit rc[{}]".format(proc.returncode))
                     if proc.returncode == 0:
-                        logger.debug("Processing complete, deleteing message uid [{}]".format(thisItemUid))
+                        logger.info("Processing complete, deleteing message uid [{}]".format(thisItemUid))
                         thisImap.uid('store',thisItemUid,'+FLAGS','\\Deleted')
                     else:
-                        logger.debug("Processing failed, NOT deleteing message uid [{}]".format(thisItemUid))
+                        logger.info("Processing failed, NOT deleteing message uid [{}]".format(thisItemUid))
             logger.debug("Expunge [{}]".format(thisAccount))
             thisImap.expunge() 
             time.sleep(imapCheckSleepSeconds)
