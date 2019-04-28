@@ -1,6 +1,5 @@
 # imapulator
 
-# IMAPULATOR 
 
 ```
 usage: imapulator [-h] [-v] [-d] [-C] [-o] [-n NUMLOOPS] configFile
