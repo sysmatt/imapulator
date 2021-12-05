@@ -1,8 +1,13 @@
 # imapulator
 
+---
+## NEW: Version 3 released
+Supports flag files, better logging, bug fixes
+---
+
 
 ```
-usage: imapulator [-h] [-v] [-d] [-C] [-o] [-n NUMLOOPS] configFile
+usage: imapulator3 [-h] [-v] [-d] [-C] [-o] [-n NUMLOOPS] [-S] configFile
 
 positional arguments:
   configFile            provide a ini configuration file
@@ -16,6 +21,7 @@ optional arguments:
   -o, --oneshot         process account(s) only once then exit
   -n NUMLOOPS, --numloops NUMLOOPS
                         process account(s) this many times then exit
+  -S, --syslog          enable logging to syslog also
 
 Configuration File Format
 =========================
@@ -31,6 +37,8 @@ USER   - IMAP Authentication User, defaults to INI SECTION NAME if missing
 HOST   - IMAP Server
 PASS   - IMAP Password
 FOLDER - IMAP Folder to read from
+FLAG   - A flag file, if defined and existing will cause this entry to be checked
+         if INI line is mising, entry runs always
 SAVEATT- Save all attachments in this (existing) directory
           For each message with attachments, a subdir uuid1 will be created.
           attachments will be saved in that dir
@@ -70,6 +78,7 @@ Example Configuration:
 HOST    = imap.gmail.com
 PASS    = blahBLAHblahPASSWORD
 SAVEATT = /tmp
+FLAG    = /tmp/ok-to-check-blah.FLAG
 PIPE    = /sage/platform/scripts/sysmatt.epson.note
 ARGS    = -s
     $SUBJECT
