@@ -3,6 +3,7 @@
 
 import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, imaplib, email, email.header, email.utils, string, subprocess, uuid
 import pprint
+from logging.handlers import SysLogHandler
 
 warnings.filterwarnings('ignore')
 ME = os.path.basename(sys.argv[0])
@@ -13,7 +14,7 @@ start_time = time.time()
 configIni = {}
 config = {}
 imapErrorSleepSeconds = 15
-imapCheckSleepSeconds = 5
+imapCheckSleepSeconds = 2
 maxAccountLoopCounter = -1  # Default, run forever
 
 configFileHelp = \
@@ -33,6 +34,8 @@ USER   - IMAP Authentication User, defaults to INI SECTION NAME if missing
 HOST   - IMAP Server
 PASS   - IMAP Password
 FOLDER - IMAP Folder to read from
+FLAG   - A flag file, if defined and existing will cause this entry to be checked
+         if INI line is mising, entry runs always
 SAVEATT- Save all attachments in this (existing) directory
           For each message with attachments, a subdir uuid1 will be created.
           attachments will be saved in that dir
@@ -72,6 +75,7 @@ Example Configuration:
 HOST    = imap.gmail.com
 PASS    = blahBLAHblahPASSWORD
 SAVEATT = /tmp
+FLAG    = /tmp/ok-to-check-blah.FLAG
 PIPE    = /sage/platform/scripts/sysmatt.epson.note
 ARGS    = -s
     $SUBJECT
@@ -114,7 +118,8 @@ parser.add_argument("-d", "--debug",    help="enable debugging output", action="
 parser.add_argument("-C", "--clear",    help="clear out pending messages upon startup before processing", action="store_true")
 parser.add_argument("-o", "--oneshot",  help="process account(s) only once then exit", action="store_true")
 parser.add_argument("-n", "--numloops", help="process account(s) this many times then exit", action="store")
-parser.add_argument("configFile",    help="provide a ini configuration file", action="store")
+parser.add_argument("-S", "--syslog",   help="enable logging to syslog also", action="store_true")
+parser.add_argument("configFile",       help="provide a ini configuration file", action="store")
 args = parser.parse_args()
 
 # Holder of imap connection objects
@@ -130,6 +135,18 @@ if args.oneshot:
 if args.numloops:
     maxAccountLoopCounter = int(args.numloops)
     logger.debug("Limit to [{}] account loops".format(maxAccountLoopCounter))
+
+if args.syslog:
+    shandler = SysLogHandler(address='/dev/log')
+    shandler.setLevel(logging.INFO)
+    if args.debug:
+        shandler.setLevel(logging.DEBUG)
+    #shandler.setFormatter(Formatter(fmt=fmt))
+    syslog_formatter = logging.Formatter('%(name)s: %(levelname)s %(message)s')
+    shandler.setFormatter(syslog_formatter)
+    logger.addHandler(shandler)
+    logger.info("Syslog Logging Enabled")
+
 
 
 def bomb(chunk):
@@ -191,6 +208,16 @@ while accountLoopCounter != maxAccountLoopCounter:
     for thisAccount in  (config.sections()):
         thisImap = imap[thisAccount]
         thisFolder = config[thisAccount].get('FOLDER','INBOX')
+        if config[thisAccount].get('FLAG',''):
+            logger.debug("FLAG [{}] config defined on [{}] account entry, checking".format(config[thisAccount].get('FLAG',''), thisAccount))
+            if os.path.exists(config[thisAccount].get('FLAG','')):
+                logger.debug("FLAG [{}] Exists. Running [{}] account entry".format(config[thisAccount].get('FLAG',''), thisAccount))
+            else:
+                logger.info("FLAG [{}] does not exist. Skipping [{}] account entry".format(config[thisAccount].get('FLAG',''), thisAccount))
+                time.sleep(imapCheckSleepSeconds)
+                continue
+
+        # attempt checking this account
         try:
             logger.debug("Select folder [{}]".format(thisFolder))
             thisImap.select(thisFolder)
@@ -255,7 +282,7 @@ while accountLoopCounter != maxAccountLoopCounter:
                         procInput=None
                 elif config[thisAccount].get('PIPE',None):
                         thisArgs.append(config[thisAccount]['PIPE'])
-                        procInput=emailData['BODY']
+                        procInput=str(emailData['BODY'])
                 else:
                     bomb("No action specified for [{}]".format(thisAccount))
                 logger.info(" === BEGIN ACTION ===")
@@ -272,7 +299,10 @@ while accountLoopCounter != maxAccountLoopCounter:
                             thisArgs.append(lineOut)
                 logger.info("FINAL SUBPROCESS: [{}]".format("],[".join(thisArgs)))
                 with subprocess.Popen(thisArgs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True) as proc:
-                    thisStdout,thisStderr = proc.communicate(input=procInput)
+                    try:
+                        thisStdout,thisStderr = proc.communicate(input=procInput)
+                    except TypeError:
+                        thisStdout,thisStderr = proc.communicate(input=procInput.encode("ascii","replace"))
                     logger.info("PROC STDOUT: [{}]".format(thisStdout))
                     logger.info("PROC STDERR: [{}]".format(thisStderr))
                     logger.info("exit rc[{}]".format(proc.returncode))
